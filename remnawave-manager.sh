@@ -132,18 +132,45 @@ docker_compose() {
     die "Docker Compose not found. Install docker compose plugin."
   fi
 }
+# --- run a command without killing the script via ERR trap (we handle rc manually)
+run_soft() {
+  local rc=0
+  trap - ERR
+  set +e
+  "$@"
+  rc=$?
+  set -e
+  trap 'on_error $LINENO' ERR
+  return "$rc"
+}
+
+cleanup_docker_repo() {
+  # Remove stale/broken Docker repo configs that can break apt-get update globally
+  rm -f /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker-ce.list >/dev/null 2>&1 || true
+  rm -f /etc/apt/keyrings/docker.gpg >/dev/null 2>&1 || true
+}
 
 install_docker_ubuntu_fallback() {
-  log_warn "Docker CE repo is not reachable (or blocked). Falling back to Ubuntu packages (docker.io)."
+  log_warn "Falling back to Ubuntu packages (docker.io)."
   export DEBIAN_FRONTEND=noninteractive
 
-  apt-get update -y
-  apt-get install -y --no-install-recommends docker.io docker-compose
+  cleanup_docker_repo
+
+  run_soft apt-get update -y || die "apt-get update failed. Check networking/DNS."
+
+  run_soft apt-get install -y --no-install-recommends docker.io || die "Failed to install docker.io from Ubuntu repo."
+
+  # Prefer compose plugin if available; fallback to docker-compose v1
+  if run_soft apt-get install -y --no-install-recommends docker-compose-plugin; then
+    :
+  else
+    run_soft apt-get install -y --no-install-recommends docker-compose || true
+  fi
 
   systemctl enable --now docker >/dev/null 2>&1 || true
 
   log_ok "Docker installed via Ubuntu repository."
-  log_warn "Note: Compose may be v1 (docker-compose). This script supports both docker compose and docker-compose."
+  log_warn "Compose support: docker compose (plugin) or docker-compose (v1) is supported by this script."
 }
 
 install_docker() {
@@ -166,6 +193,9 @@ install_docker() {
     return
   fi
 
+  # If previous attempts left a broken docker repo, it can break apt-get update entirely.
+  cleanup_docker_repo
+
   log_info "Installing Docker (official repository method)..."
   apt_install ca-certificates curl gnupg lsb-release
 
@@ -178,54 +208,69 @@ install_docker() {
 
   install -m 0755 -d /etc/apt/keyrings
 
-  # --- Fetch GPG key (try IPv4 first to avoid some CDN/IPv6 edge issues) ---
+  # --- Fetch Docker GPG key (always rebuild to avoid stale/empty key files) ---
   local gpg_url="https://download.docker.com/linux/${os_id}/gpg"
-  if [[ ! -f /etc/apt/keyrings/docker.gpg ]]; then
-    if curl -4 -fsSL "${gpg_url}" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg; then
-      chmod a+r /etc/apt/keyrings/docker.gpg
-    elif curl -fsSL "${gpg_url}" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg; then
-      chmod a+r /etc/apt/keyrings/docker.gpg
-    else
-      rm -f /etc/apt/keyrings/docker.gpg >/dev/null 2>&1 || true
-      if [[ "${method}" == "official" ]]; then
-        die "Failed to fetch Docker GPG key from ${gpg_url}. Your network may block download.docker.com."
-      fi
-      install_docker_ubuntu_fallback
-      return
-    fi
+  local tmpkey
+  tmpkey="$(mktemp -t docker-gpg.XXXXXX)"
+
+  if ! run_soft curl -4 -fsSL "${gpg_url}" -o "${tmpkey}"; then
+    run_soft curl -fsSL "${gpg_url}" -o "${tmpkey}" || true
   fi
+
+  if [[ ! -s "${tmpkey}" ]]; then
+    rm -f "${tmpkey}" || true
+    if [[ "${method}" == "official" ]]; then
+      die "Failed to fetch Docker GPG key (empty/blocked). Your network may restrict download.docker.com."
+    fi
+    install_docker_ubuntu_fallback
+    return
+  fi
+
+  if ! run_soft gpg --dearmor -o /etc/apt/keyrings/docker.gpg "${tmpkey}"; then
+    rm -f "${tmpkey}" || true
+    rm -f /etc/apt/keyrings/docker.gpg >/dev/null 2>&1 || true
+    if [[ "${method}" == "official" ]]; then
+      die "Failed to import Docker GPG key. Network may be returning non-key content."
+    fi
+    install_docker_ubuntu_fallback
+    return
+  fi
+  rm -f "${tmpkey}" || true
+  chmod a+r /etc/apt/keyrings/docker.gpg
 
   cat >/etc/apt/sources.list.d/docker.list <<EOF
 deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${os_id} ${codename} stable
 EOF
 
-  # --- apt update (retry + ForceIPv4 fallback) ---
   export DEBIAN_FRONTEND=noninteractive
-  if ! apt-get update -y; then
+
+  # --- apt update (try normal, then ForceIPv4). DO NOT let ERR trap exit. ---
+  if ! run_soft apt-get update -y; then
     log_warn "Docker repo update failed. Retrying with IPv4 forced..."
-    if ! apt-get -o Acquire::ForceIPv4=true update -y; then
+    if ! run_soft apt-get -o Acquire::ForceIPv4=true update -y; then
       rm -f /etc/apt/sources.list.d/docker.list >/dev/null 2>&1 || true
       if [[ "${method}" == "official" ]]; then
-        die "Docker repo is not reachable (403/GPG/network). Set DOCKER_INSTALL_METHOD=ubuntu to bypass."
+        die "Docker repo is not usable (NO_PUBKEY/403/network). Set DOCKER_INSTALL_METHOD=ubuntu to bypass."
       fi
       install_docker_ubuntu_fallback
       return
     fi
   fi
 
-  # --- Install Docker CE packages ---
-  if apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+  # --- Install Docker CE packages (soft, to allow fallback) ---
+  if run_soft apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
     systemctl enable --now docker >/dev/null 2>&1 || true
     log_ok "Docker installed successfully (Docker CE)."
     return
   fi
 
-  # If install fails, fallback in auto mode
   log_warn "Docker CE install failed."
   rm -f /etc/apt/sources.list.d/docker.list >/dev/null 2>&1 || true
+
   if [[ "${method}" == "official" ]]; then
     die "Docker CE install failed and DOCKER_INSTALL_METHOD=official is set. Try DOCKER_INSTALL_METHOD=ubuntu."
   fi
+
   install_docker_ubuntu_fallback
 }
 
