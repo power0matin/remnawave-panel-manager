@@ -4,14 +4,14 @@
   <a href="./README.fa.md"><b>فارسی</b></a>
 </p>
 
-<h1 align="center">🚀 Remnawave DeployKit</h1>
-<p align="center"><b>Production-grade installer & lifecycle manager for Remnawave Panel and Nodes</b></p>
+<h1 align="center">🚀 Remnawave Panel Manager</h1>
+<p align="center"><b>One-command installer & production-grade lifecycle manager for Remnawave Panel and Nodes</b></p>
 
 <p align="center">
-  <a href="#">
+  <a href="https://github.com/power0matin/remnawave-panel-manager">
     <img src="https://badges.strrl.dev/visits/power0matin/remnawave-panel-manager?style=flat&labelColor=333333&logoColor=E7E7E7&label=Visits&logo=github" />
   </a>
-  <a href="#">
+  <a href="https://github.com/power0matin/remnawave-panel-manager/stargazers">
     <img src="https://img.shields.io/github/stars/power0matin/remnawave-panel-manager?style=flat&labelColor=333333&logoColor=E7E7E7&color=EEAA00&label=Stars&logo=github" />
   </a>
   <a href="./LICENSE">
@@ -67,7 +67,23 @@ It focuses on:
 
 - `git`
 
-## 🚀 Quick Start (Install Panel)
+## ⚡ Quick Install (One-liner)
+
+> Recommended (runs as root via sudo):
+
+```bash
+sudo bash <(curl -Ls https://raw.githubusercontent.com/power0matin/remnawave-panel-manager/main/install.sh)
+```
+
+### Direct install (no menu)
+
+```bash
+sudo bash <(curl -Ls https://raw.githubusercontent.com/power0matin/remnawave-panel-manager/main/install.sh) install-panel --domain panel.example.com --email admin@example.com
+```
+
+> Security note: Running remote scripts is convenient but trust-sensitive. Use the manual install below if you prefer to review the code first.
+
+## 🧑‍🔧 Manual Install (Recommended for advanced users)
 
 ```bash
 sudo apt-get update -y
