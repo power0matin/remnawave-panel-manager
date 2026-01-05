@@ -38,9 +38,32 @@ read_i() {
   fi
 }
 
-pause() {
-  # Never fail hard on pause
-  read_i "Press Enter to continue..." _ || true
+pause_msg() {
+  local msg="${1:-Press Enter to return to menu...}"
+  echo ""
+  echo -e "${YELLOW}${msg}${NC}"
+  read_i "" _ || true
+}
+
+# Run an action and ALWAYS return to menu (never exit on failure)
+run_action() {
+  local title="$1"; shift
+
+  show_header
+  echo -e "${BLUE}[ACTION]${NC} ${title}"
+  echo ""
+
+  # Prevent set -e from killing the menu loop
+  local rc=0
+  if run_manager "$@"; then
+    log_ok "Done: ${title}"
+  else
+    rc=$?
+    log_err "Failed (${rc}): ${title}"
+  fi
+
+  pause_msg "Press Enter to return to menu..."
+  return 0
 }
 
 log_info() { echo -e "${BLUE}[INFO]${NC} $*"; }
@@ -78,6 +101,23 @@ show_header() {
   echo -e "${RED}==========================================================${NC}"
   echo ""
 }
+IN_MENU="false"
+
+on_int() {
+  # If user hits Ctrl+C, do not exit; just return to menu
+  if [[ "${IN_MENU}" == "true" ]]; then
+    echo ""
+    log_warn "Interrupted. Returning to menu..."
+    sleep 1
+    return 0
+  fi
+
+  # If not in menu (e.g., direct mode), exit with standard code
+  echo ""
+  log_warn "Interrupted."
+  exit 130
+}
+trap on_int INT
 
 main() {
   need_cmd curl
@@ -115,31 +155,44 @@ main() {
     echo "8) Exit"
     echo ""
     if ! read_i "Enter choice [1-8]: " choice; then
-      die "Interactive mode requires a TTY. Try direct mode:\n  curl -fsSL ${RAW_BASE}/install.sh | sudo bash -s -- install-panel --domain panel.example.com --email admin@example.com"
+      # If no TTY, interactive is impossible; exit with a helpful hint
+      log_err "Interactive mode requires a TTY."
+      echo "Try direct mode:"
+      echo "  curl -fsSL ${RAW_BASE}/install.sh | sudo bash -s -- status"
+      echo "  curl -fsSL ${RAW_BASE}/install.sh | sudo bash -s -- install-panel --domain panel.example.com --email admin@example.com"
+      exit 2
     fi
 
     case "${choice}" in
       1)
         if ! read_i "Enter your Domain (e.g., panel.example.com): " domain; then
-          die "No interactive input available."
+          log_err "No interactive input available."
+          pause_msg
+          continue
         fi
-        [[ -n "${domain}" ]] || die "Domain cannot be empty."
 
+        if [[ -z "${domain}" ]]; then
+          log_warn "Domain cannot be empty."
+          pause_msg
+          continue
+        fi
         if ! read_i "Enter email for TLS (optional, recommended): " email; then
           die "No interactive input available."
         fi
 
         if [[ -n "${email}" ]]; then
-          run_manager install-panel --domain "${domain}" --email "${email}"
+          IN_MENU="true"
+          run_action "Install Panel for ${domain}" install-panel --domain "${domain}" --email "${email}"
         else
-          run_manager install-panel --domain "${domain}"
+          IN_MENU="true"
+          run_action "Install Panel for ${domain}" install-panel --domain "${domain}"
         fi
 
         pause
         ;;
       2)
-        run_manager install-node
-        pause
+        IN_MENU="true"
+        run_action "Install Node (On this server)" install-node
         ;;
       3)
         run_manager uninstall-panel
@@ -154,12 +207,12 @@ main() {
         pause
         ;;
       6)
-        run_manager logs --panel --tail 200
-        pause
+        IN_MENU="true"
+        run_action "Panel Logs (tail 200)" logs --panel --tail 200
         ;;
       7)
-        run_manager update --panel
-        pause
+        IN_MENU="true"
+        run_action "Update Panel (pull images + recreate)" update --panel
         ;;
       8)
         log_ok "Bye."
