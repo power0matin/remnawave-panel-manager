@@ -133,6 +133,19 @@ docker_compose() {
   fi
 }
 
+install_docker_ubuntu_fallback() {
+  log_warn "Docker CE repo is not reachable (or blocked). Falling back to Ubuntu packages (docker.io)."
+  export DEBIAN_FRONTEND=noninteractive
+
+  apt-get update -y
+  apt-get install -y --no-install-recommends docker.io docker-compose
+
+  systemctl enable --now docker >/dev/null 2>&1 || true
+
+  log_ok "Docker installed via Ubuntu repository."
+  log_warn "Note: Compose may be v1 (docker-compose). This script supports both docker compose and docker-compose."
+}
+
 install_docker() {
   if has_cmd docker && (docker compose version >/dev/null 2>&1 || has_cmd docker-compose); then
     log_ok "Docker & Compose are already installed."
@@ -141,45 +154,79 @@ install_docker() {
 
   detect_apt_based || die "Unsupported OS. This script supports Debian/Ubuntu (APT-based) only."
 
+  local method="${DOCKER_INSTALL_METHOD:-auto}" # auto|official|ubuntu
+  case "${method}" in
+    auto|official|ubuntu) ;;
+    *) die "Invalid DOCKER_INSTALL_METHOD='${method}'. Use: auto|official|ubuntu" ;;
+  esac
+
+  if [[ "${method}" == "ubuntu" ]]; then
+    log_info "Installing Docker (Ubuntu repository method)..."
+    install_docker_ubuntu_fallback
+    return
+  fi
+
   log_info "Installing Docker (official repository method)..."
   apt_install ca-certificates curl gnupg lsb-release
 
-  local os_id
+  local os_id arch codename
   # shellcheck disable=SC1091
   . /etc/os-release
   os_id="${ID}"
+  arch="$(dpkg --print-architecture)"
+  codename="$(lsb_release -cs)"
 
   install -m 0755 -d /etc/apt/keyrings
 
-  # Refresh key if missing OR empty/corrupted (common when curl gets blocked/403)
-  if [[ ! -s /etc/apt/keyrings/docker.gpg ]]; then
-    local os_id
-    # shellcheck disable=SC1091
-    . /etc/os-release
-    os_id="${ID}"
-
-    log_info "Fetching Docker GPG key..."
-    if ! curl -fsSL "https://download.docker.com/linux/${os_id}/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg; then
-      die "Failed to fetch Docker GPG key from download.docker.com (network restriction / 403 / blocked). Install Docker manually or use Ubuntu repo packages (docker.io) as a fallback."
+  # --- Fetch GPG key (try IPv4 first to avoid some CDN/IPv6 edge issues) ---
+  local gpg_url="https://download.docker.com/linux/${os_id}/gpg"
+  if [[ ! -f /etc/apt/keyrings/docker.gpg ]]; then
+    if curl -4 -fsSL "${gpg_url}" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg; then
+      chmod a+r /etc/apt/keyrings/docker.gpg
+    elif curl -fsSL "${gpg_url}" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg; then
+      chmod a+r /etc/apt/keyrings/docker.gpg
+    else
+      rm -f /etc/apt/keyrings/docker.gpg >/dev/null 2>&1 || true
+      if [[ "${method}" == "official" ]]; then
+        die "Failed to fetch Docker GPG key from ${gpg_url}. Your network may block download.docker.com."
+      fi
+      install_docker_ubuntu_fallback
+      return
     fi
-    chmod a+r /etc/apt/keyrings/docker.gpg
   fi
-
-  local arch
-  arch="$(dpkg --print-architecture)"
-
-  local codename
-  codename="$(lsb_release -cs)"
 
   cat >/etc/apt/sources.list.d/docker.list <<EOF
 deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${os_id} ${codename} stable
 EOF
 
-  apt-get update -y
-  apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  # --- apt update (retry + ForceIPv4 fallback) ---
+  export DEBIAN_FRONTEND=noninteractive
+  if ! apt-get update -y; then
+    log_warn "Docker repo update failed. Retrying with IPv4 forced..."
+    if ! apt-get -o Acquire::ForceIPv4=true update -y; then
+      rm -f /etc/apt/sources.list.d/docker.list >/dev/null 2>&1 || true
+      if [[ "${method}" == "official" ]]; then
+        die "Docker repo is not reachable (403/GPG/network). Set DOCKER_INSTALL_METHOD=ubuntu to bypass."
+      fi
+      install_docker_ubuntu_fallback
+      return
+    fi
+  fi
 
-  systemctl enable --now docker >/dev/null 2>&1 || true
-  log_ok "Docker installed successfully."
+  # --- Install Docker CE packages ---
+  if apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+    systemctl enable --now docker >/dev/null 2>&1 || true
+    log_ok "Docker installed successfully (Docker CE)."
+    return
+  fi
+
+  # If install fails, fallback in auto mode
+  log_warn "Docker CE install failed."
+  rm -f /etc/apt/sources.list.d/docker.list >/dev/null 2>&1 || true
+  if [[ "${method}" == "official" ]]; then
+    die "Docker CE install failed and DOCKER_INSTALL_METHOD=official is set. Try DOCKER_INSTALL_METHOD=ubuntu."
+  fi
+  install_docker_ubuntu_fallback
 }
 
 sanitize_domain() {
