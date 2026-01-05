@@ -69,6 +69,21 @@ rand_hex() {
     head -c "$bytes" /dev/urandom | od -An -tx1 | tr -d ' \n'
   fi
 }
+require_docker_or_die() {
+  if ! has_cmd docker; then
+    die "Docker is not installed. Run: $0 install-panel (or install Docker first)."
+  fi
+
+  # Compose v2 plugin OR docker-compose v1
+  if docker compose version >/dev/null 2>&1; then
+    return 0
+  fi
+  if has_cmd docker-compose; then
+    return 0
+  fi
+
+  die "Docker Compose not found. Install docker compose plugin or docker-compose."
+}
 
 confirm() {
   local prompt="${1:-Are you sure?}"
@@ -105,6 +120,13 @@ Examples:
 Notes:
   - Debian/Ubuntu only (APT-based).
   - Requires ports 80/443 open for Caddy HTTPS.
+  - Optional env vars:
+      DOCKER_INSTALL_METHOD=auto|official|ubuntu
+      DOCKER_REGISTRY_MIRROR=https://mirror.example.com
+      RMNW_BACKEND_IMAGE=...
+      RMNW_POSTGRES_IMAGE=...
+      RMNW_VALKEY_IMAGE=...
+      RMNW_CADDY_IMAGE=...
 EOF
 }
 
@@ -143,6 +165,35 @@ run_soft() {
   trap 'on_error $LINENO' ERR
   return "$rc"
 }
+configure_docker_registry_mirror() {
+  # Optional: configure a Docker registry mirror to bypass Docker Hub restrictions.
+  # User provides DOCKER_REGISTRY_MIRROR, e.g. https://mirror.example.com
+  local mirror="${DOCKER_REGISTRY_MIRROR:-}"
+  [[ -n "${mirror}" ]] || return 0
+
+  mkdir -p /etc/docker
+  local daemon="/etc/docker/daemon.json"
+
+  if [[ -f "${daemon}" ]]; then
+    if grep -q '"registry-mirrors"' "${daemon}"; then
+      log_ok "Docker registry mirror already configured in ${daemon}."
+      return 0
+    fi
+    log_warn "Found existing ${daemon}; not modifying automatically."
+    log_warn "To add a mirror, update it manually and restart Docker."
+    log_warn "Suggested JSON: {\"registry-mirrors\": [\"${mirror}\"]}"
+    return 0
+  fi
+
+  cat >"${daemon}" <<EOF
+{
+  "registry-mirrors": ["${mirror}"]
+}
+EOF
+
+  systemctl restart docker >/dev/null 2>&1 || true
+  log_ok "Configured Docker registry mirror: ${mirror}"
+}
 
 cleanup_docker_repo() {
   # Remove stale/broken Docker repo configs that can break apt-get update globally
@@ -151,26 +202,30 @@ cleanup_docker_repo() {
 }
 
 install_docker_ubuntu_fallback() {
-  log_warn "Falling back to Ubuntu packages (docker.io)."
+  log_warn "Docker CE repo is not reachable (or blocked). Falling back to Ubuntu packages (docker.io)."
   export DEBIAN_FRONTEND=noninteractive
 
-  cleanup_docker_repo
-
-  run_soft apt-get update -y || die "apt-get update failed. Check networking/DNS."
-
-  run_soft apt-get install -y --no-install-recommends docker.io || die "Failed to install docker.io from Ubuntu repo."
-
-  # Prefer compose plugin if available; fallback to docker-compose v1
-  if run_soft apt-get install -y --no-install-recommends docker-compose-plugin; then
-    :
-  else
-    run_soft apt-get install -y --no-install-recommends docker-compose || true
-  fi
+  apt-get update -y
+  apt-get install -y --no-install-recommends docker.io
 
   systemctl enable --now docker >/dev/null 2>&1 || true
 
+  # Optional: configure mirror (safe behavior if daemon.json already exists)
+  configure_docker_registry_mirror
+
+  # Prefer compose v2 package if available; fallback to v1
+  if ! docker compose version >/dev/null 2>&1; then
+    if apt-cache show docker-compose-v2 >/dev/null 2>&1; then
+      apt-get install -y --no-install-recommends docker-compose-v2 || true
+    fi
+  fi
+
+  if ! docker compose version >/dev/null 2>&1 && ! has_cmd docker-compose; then
+    apt-get install -y --no-install-recommends docker-compose
+  fi
+
   log_ok "Docker installed via Ubuntu repository."
-  log_warn "Compose support: docker compose (plugin) or docker-compose (v1) is supported by this script."
+  log_warn "Compose support: docker compose (v2) or docker-compose (v1) is supported by this script."
 }
 
 install_docker() {
@@ -260,6 +315,10 @@ EOF
   # --- Install Docker CE packages (soft, to allow fallback) ---
   if run_soft apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
     systemctl enable --now docker >/dev/null 2>&1 || true
+
+    # Optional: configure mirror (safe behavior if daemon.json already exists)
+    configure_docker_registry_mirror
+
     log_ok "Docker installed successfully (Docker CE)."
     return
   fi
@@ -299,7 +358,8 @@ write_panel_files() {
   umask 077
 
   local jwt_auth_secret jwt_api_tokens_secret webhook_secret metrics_user metrics_pass
-  local pg_user pg_pass pg_db redis_host redis_port backend_image
+  local pg_user pg_pass pg_db redis_host redis_port
+  local backend_image postgres_image valkey_image caddy_image
 
   jwt_auth_secret="$(rand_hex 64)"
   jwt_api_tokens_secret="$(rand_hex 64)"
@@ -315,7 +375,11 @@ write_panel_files() {
   redis_host="remnawave-redis"
   redis_port="6379"
 
-  backend_image="remnawave/backend:latest"
+  # Images (override-friendly) - allow bypassing Docker Hub
+  backend_image="${RMNW_BACKEND_IMAGE:-remnawave/backend:latest}"
+  postgres_image="${RMNW_POSTGRES_IMAGE:-postgres:17.0}"
+  valkey_image="${RMNW_VALKEY_IMAGE:-valkey/valkey:8.0-alpine}"
+  caddy_image="${RMNW_CADDY_IMAGE:-caddy:2-alpine}"
 
   cat > .env <<EOF
 # Remnawave Panel Environment
@@ -343,8 +407,11 @@ DATABASE_URL=postgresql://${pg_user}:${pg_pass}@remnawave-db:5432/${pg_db}?schem
 REDIS_HOST=${redis_host}
 REDIS_PORT=${redis_port}
 
-# Image
+# Images (override-friendly)
 BACKEND_IMAGE=${backend_image}
+POSTGRES_IMAGE=${postgres_image}
+VALKEY_IMAGE=${valkey_image}
+CADDY_IMAGE=${caddy_image}
 EOF
 
   chmod 600 .env
@@ -352,7 +419,7 @@ EOF
   cat > docker-compose.yml <<'EOF'
 services:
   remnawave-db:
-    image: postgres:17.0
+    image: ${POSTGRES_IMAGE}
     restart: unless-stopped
     env_file: .env
     environment:
@@ -375,7 +442,7 @@ services:
         max-file: "3"
 
   remnawave-redis:
-    image: valkey/valkey:8.0-alpine
+    image: ${VALKEY_IMAGE}
     restart: unless-stopped
     volumes:
       - remnawave-redis-data:/data
@@ -410,7 +477,7 @@ services:
         max-file: "3"
 
   caddy:
-    image: caddy:2-alpine
+    image: ${CADDY_IMAGE}
     restart: unless-stopped
     ports:
       - "80:80"
@@ -460,10 +527,47 @@ EOF
   docker_compose -f docker-compose.yml config -q
   log_ok "Panel files generated under ${PANEL_DIR}"
 }
+docker_pull_with_hint() {
+  # Pull images and show a friendly hint if registry access is blocked.
+  local out rc
+
+  trap - ERR
+  set +e
+  out="$(docker_compose pull 2>&1)"
+  rc=$?
+  set -e
+  trap 'on_error $LINENO' ERR
+
+  if [[ $rc -ne 0 ]]; then
+    echo "${out}"
+
+    if echo "${out}" | grep -qiE "export control regulations|Since Docker is a US company|denied:.*403 Forbidden|403 Forbidden"; then
+      log_error "Image pull failed due to registry access restrictions (403 / export control)."
+      log_warn "Fix options:"
+      log_warn "  1) Use a Docker registry mirror (recommended):"
+      log_warn "     - Set DOCKER_REGISTRY_MIRROR and re-run install-panel"
+      log_warn "  2) Override images to a reachable registry (set these env vars):"
+      log_warn "     - RMNW_POSTGRES_IMAGE, RMNW_VALKEY_IMAGE, RMNW_CADDY_IMAGE, RMNW_BACKEND_IMAGE"
+      log_warn "Example:"
+      log_warn "  sudo DOCKER_REGISTRY_MIRROR=https://mirror.example.com \\"
+      log_warn "    RMNW_BACKEND_IMAGE=ghcr.io/remnawave/backend:latest \\"
+      log_warn "    $0 install-panel --domain panel.example.com --email admin@example.com"
+    else
+      log_error "Image pull failed. Check network/DNS/proxy and try again."
+    fi
+
+    return "$rc"
+  fi
+
+  return 0
+}
 
 panel_up() {
   cd "${PANEL_DIR}"
   log_info "Starting Remnawave Panel stack..."
+
+  docker_pull_with_hint || return 1
+
   docker_compose up -d
   log_ok "Services started."
   log_info "Useful commands:"
@@ -485,6 +589,9 @@ node_up() {
   cd "${NODE_DIR}"
   docker_compose -f docker-compose.yml config -q
   log_info "Starting Node stack..."
+
+  docker_pull_with_hint || return 1
+
   docker_compose up -d
   log_ok "Node started successfully."
 }
@@ -544,7 +651,7 @@ update_cmd() {
 
   cd "${dir}"
   log_info "Pulling latest images..."
-  docker_compose pull
+  docker_pull_with_hint || return 1
   log_info "Recreating containers..."
   docker_compose up -d
   log_ok "Update completed."
