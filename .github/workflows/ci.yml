@@ -12,4 +12,4 @@ jobs:
       - name: Install ShellCheck
         run: sudo apt-get update -y && sudo apt-get install -y shellcheck
       - name: ShellCheck
-        run: shellcheck remnawave-manager.sh
+        run: shellcheck remnawave-manager.sh install.sh
