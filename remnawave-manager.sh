@@ -150,9 +150,18 @@ install_docker() {
   os_id="${ID}"
 
   install -m 0755 -d /etc/apt/keyrings
-  if [[ ! -f /etc/apt/keyrings/docker.gpg ]]; then
-    curl -fsSL "https://download.docker.com/linux/${os_id}/gpg" \
-      | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+  # Refresh key if missing OR empty/corrupted (common when curl gets blocked/403)
+  if [[ ! -s /etc/apt/keyrings/docker.gpg ]]; then
+    local os_id
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    os_id="${ID}"
+
+    log_info "Fetching Docker GPG key..."
+    if ! curl -fsSL "https://download.docker.com/linux/${os_id}/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg; then
+      die "Failed to fetch Docker GPG key from download.docker.com (network restriction / 403 / blocked). Install Docker manually or use Ubuntu repo packages (docker.io) as a fallback."
+    fi
     chmod a+r /etc/apt/keyrings/docker.gpg
   fi
 
@@ -516,10 +525,18 @@ main() {
       ;;
   esac
 
-  # Ensure docker for commands that need it
+  # Docker auto-install only for install commands (better UX + fewer surprises)
   case "${cmd}" in
-    install-panel|install-node|uninstall-panel|uninstall-node|status|logs|update|backup)
+    install-panel|install-node)
       install_docker
+      ;;
+    status|logs|update|backup)
+      require_docker_or_die
+      ;;
+    uninstall-panel|uninstall-node)
+      # Optional: do NOT force docker install for uninstall.
+      # If docker is missing, we will fail later with a clear message when needed.
+      :
       ;;
   esac
 
