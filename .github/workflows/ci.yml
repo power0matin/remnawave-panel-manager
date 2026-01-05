@@ -2,14 +2,45 @@ name: CI
 
 on:
   push:
+    branches: ["main"]
   pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  shellcheck:
+  lint:
+    name: Lint (Bash)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Install ShellCheck
-        run: sudo apt-get update -y && sudo apt-get install -y shellcheck
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: Bash syntax check
+        run: |
+          set -euo pipefail
+          bash -n install.sh
+          bash -n remnawave-manager.sh
+
       - name: ShellCheck
-        run: shellcheck remnawave-manager.sh install.sh
+        run: |
+          set -euo pipefail
+          shellcheck --version
+          shellcheck \
+            --shell=bash \
+            --format=gcc \
+            install.sh remnawave-manager.sh

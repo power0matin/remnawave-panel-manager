@@ -144,19 +144,20 @@ install_docker() {
   log_info "Installing Docker (official repository method)..."
   apt_install ca-certificates curl gnupg lsb-release
 
+  local os_id
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  os_id="${ID}"
+
   install -m 0755 -d /etc/apt/keyrings
   if [[ ! -f /etc/apt/keyrings/docker.gpg ]]; then
-    curl -fsSL "https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg" \
+    curl -fsSL "https://download.docker.com/linux/${os_id}/gpg" \
       | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
     chmod a+r /etc/apt/keyrings/docker.gpg
   fi
 
   local arch
   arch="$(dpkg --print-architecture)"
-  local os_id
-  # shellcheck disable=SC1091
-  . /etc/os-release
-  os_id="$ID"
 
   local codename
   codename="$(lsb_release -cs)"
