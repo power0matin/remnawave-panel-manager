@@ -20,6 +20,29 @@ YELLOW=$'\033[1;33m'
 BLUE=$'\033[0;34m'
 NC=$'\033[0m'
 
+# ---------- Interactive input (works even when stdin is piped) ----------
+TTY_FD=0
+if [[ -r /dev/tty ]]; then
+  exec 3</dev/tty
+  TTY_FD=3
+fi
+
+read_i() {
+  local prompt="$1"
+  local var="$2"
+
+  if [[ "${TTY_FD}" -ne 0 ]]; then
+    read -r -u "${TTY_FD}" -p "${prompt}" "${var}"
+  else
+    read -r -p "${prompt}" "${var}"
+  fi
+}
+
+pause() {
+  # Never fail hard on pause
+  read_i "Press Enter to continue..." _ || true
+}
+
 log_info() { echo -e "${BLUE}[INFO]${NC} $*"; }
 log_ok()   { echo -e "${GREEN}[ OK ]${NC} $*"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
@@ -29,7 +52,7 @@ die() { log_err "$*"; exit 1; }
 
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
-    die "Please run as root. Use:\n  sudo bash <(curl -Ls ${RAW_BASE}/install.sh)"
+    die "Please run as root. Use one of these:\n  curl -fsSL ${RAW_BASE}/install.sh | sudo bash\n  curl -fsSL ${RAW_BASE}/install.sh -o /tmp/remnawave-install.sh && sudo bash /tmp/remnawave-install.sh"
   fi
 }
 
@@ -63,11 +86,19 @@ main() {
   local manager
   manager="$(download_manager)"
 
+  run_manager() {
+    if [[ "${TTY_FD}" -ne 0 ]]; then
+      bash "${manager}" "$@" <&${TTY_FD}
+    else
+      bash "${manager}" "$@"
+    fi
+  }
+
   # If user passed arguments, directly forward to manager (advanced usage)
   # Example:
-  # sudo bash <(curl -Ls .../install.sh) install-panel --domain panel.example.com --email admin@example.com
+  # curl -fsSL .../install.sh | sudo bash -s -- install-panel --domain panel.example.com --email admin@example.com
   if [[ $# -gt 0 ]]; then
-    bash "${manager}" "$@"
+    run_manager "$@"
     exit 0
   fi
 
@@ -83,45 +114,52 @@ main() {
     echo "7) Update (Panel)"
     echo "8) Exit"
     echo ""
-    read -r -p "Enter choice [1-8]: " choice
+    if ! read_i "Enter choice [1-8]: " choice; then
+      die "Interactive mode requires a TTY. Try direct mode:\n  curl -fsSL ${RAW_BASE}/install.sh | sudo bash -s -- install-panel --domain panel.example.com --email admin@example.com"
+    fi
 
     case "${choice}" in
       1)
-        read -r -p "Enter your Domain (e.g., panel.example.com): " domain
+        if ! read_i "Enter your Domain (e.g., panel.example.com): " domain; then
+          die "No interactive input available."
+        fi
         [[ -n "${domain}" ]] || die "Domain cannot be empty."
-        read -r -p "Enter email for TLS (optional, recommended): " email
 
-        if [[ -n "${email}" ]]; then
-          bash "${manager}" install-panel --domain "${domain}" --email "${email}"
-        else
-          bash "${manager}" install-panel --domain "${domain}"
+        if ! read_i "Enter email for TLS (optional, recommended): " email; then
+          die "No interactive input available."
         fi
 
-        read -r -p "Press Enter to continue..." _
+        if [[ -n "${email}" ]]; then
+          run_manager install-panel --domain "${domain}" --email "${email}"
+        else
+          run_manager install-panel --domain "${domain}"
+        fi
+
+        pause
         ;;
       2)
-        bash "${manager}" install-node
-        read -r -p "Press Enter to continue..." _
+        run_manager install-node
+        pause
         ;;
       3)
-        bash "${manager}" uninstall-panel
-        read -r -p "Press Enter to continue..." _
+        run_manager uninstall-panel
+        pause
         ;;
       4)
-        bash "${manager}" uninstall-node
-        read -r -p "Press Enter to continue..." _
+        run_manager uninstall-node
+        pause
         ;;
       5)
-        bash "${manager}" status
-        read -r -p "Press Enter to continue..." _
+        run_manager status
+        pause
         ;;
       6)
-        bash "${manager}" logs --panel --tail 200
-        read -r -p "Press Enter to continue..." _
+        run_manager logs --panel --tail 200
+        pause
         ;;
       7)
-        bash "${manager}" update --panel
-        read -r -p "Press Enter to continue..." _
+        run_manager update --panel
+        pause
         ;;
       8)
         log_ok "Bye."
