@@ -72,13 +72,13 @@ It focuses on:
 > Recommended (runs as root via sudo):
 
 ```bash
-sudo bash <(curl -Ls https://raw.githubusercontent.com/power0matin/remnawave-panel-manager/main/install.sh)
+curl -fsSL https://raw.githubusercontent.com/power0matin/remnawave-panel-manager/main/install.sh | sudo bash
 ```
 
 ### Direct install (no menu)
 
 ```bash
-sudo bash <(curl -Ls https://raw.githubusercontent.com/power0matin/remnawave-panel-manager/main/install.sh) install-panel --domain panel.example.com --email admin@example.com
+curl -fsSL https://raw.githubusercontent.com/power0matin/remnawave-panel-manager/main/install.sh | sudo bash -s -- install-panel --domain panel.example.com --email admin@example.com
 ```
 
 > Security note: Running remote scripts is convenient but trust-sensitive. Use the manual install below if you prefer to review the code first.
