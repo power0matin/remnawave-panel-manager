@@ -66,10 +66,10 @@ run_action() {
   return 0
 }
 
-log_info() { echo -e "${BLUE}[INFO]${NC} $*"; }
-log_ok()   { echo -e "${GREEN}[ OK ]${NC} $*"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
-log_err()  { echo -e "${RED}[ERR ]${NC} $*"; }
+log_info() { echo -e "${BLUE}[INFO]${NC} $*" >&2; }
+log_ok()   { echo -e "${GREEN}[ OK ]${NC} $*" >&2; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
+log_err()  { echo -e "${RED}[ERR ]${NC} $*" >&2; }
 
 die() { log_err "$*"; exit 1; }
 
@@ -84,12 +84,31 @@ need_cmd() {
 }
 
 download_manager() {
-  local tmp
+  local tmp retries=3 n=1
   tmp="$(mktemp -t remnawave-manager.XXXXXX)"
-  log_info "Downloading manager: ${MANAGER_URL}"
-  curl -fsSL "${MANAGER_URL}" -o "${tmp}"
+
+  while true; do
+    log_info "Downloading manager (${n}/${retries})..."
+    if curl -fsSL "${MANAGER_URL}" -o "${tmp}"; then
+      break
+    fi
+
+    if (( n >= retries )); then
+      rm -f "${tmp}" || true
+      die "Failed to download manager. Check network/DNS and try again."
+    fi
+
+    n=$((n+1))
+    sleep 1
+  done
+
+  if [[ ! -s "${tmp}" ]]; then
+    rm -f "${tmp}" || true
+    die "Downloaded manager is empty. Please try again."
+  fi
+
   chmod +x "${tmp}"
-  echo "${tmp}"
+  echo "${tmp}"  # IMPORTANT: only output path on stdout
 }
 
 show_header() {
@@ -155,7 +174,12 @@ main() {
     echo "8) Exit"
     echo ""
     if ! read_i "Enter choice [1-8]: " choice; then
-      # If no TTY, interactive is impossible; exit with a helpful hint
+      if [[ "${TTY_FD}" -ne 0 ]]; then
+        log_warn "No input received. Returning to menu..."
+        sleep 1
+        continue
+      fi
+
       log_err "Interactive mode requires a TTY."
       echo "Try direct mode:"
       echo "  curl -fsSL ${RAW_BASE}/install.sh | sudo bash -s -- status"
@@ -187,24 +211,22 @@ main() {
           IN_MENU="true"
           run_action "Install Panel for ${domain}" install-panel --domain "${domain}"
         fi
-
-        pause
         ;;
       2)
         IN_MENU="true"
         run_action "Install Node (On this server)" install-node
         ;;
       3)
-        run_manager uninstall-panel
-        pause
+        IN_MENU="true"
+        run_action "Uninstall Panel (Delete everything)" uninstall-panel
         ;;
       4)
-        run_manager uninstall-node
-        pause
+        IN_MENU="true"
+        run_action "Uninstall Node (Delete node only)" uninstall-node
         ;;
       5)
-        run_manager status
-        pause
+        IN_MENU="true"
+        run_action "Status (Panel/Node)" status
         ;;
       6)
         IN_MENU="true"
@@ -219,8 +241,8 @@ main() {
         exit 0
         ;;
       *)
-        log_warn "Invalid option."
-        sleep 1
+        log_warn "Invalid option: ${choice}"
+        pause_msg "Press Enter to return to menu..."
         ;;
     esac
   done
