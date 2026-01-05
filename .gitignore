@@ -1,0 +1,6 @@
+# OS / Editor
+.DS_Store
+.vscode/
+
+# Secrets (never commit)
+**/.env
