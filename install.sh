@@ -29,12 +29,20 @@ fi
 
 read_i() {
   local prompt="$1"
-  local var="$2"
+  local var_name="$2"
+
+  # Validate var name to avoid unexpected behavior
+  if [[ ! "${var_name}" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+    die "Internal error: invalid variable name '${var_name}'"
+  fi
+
+  # Bash nameref: write into the caller-provided variable
+  local -n out="${var_name}"
 
   if [[ "${TTY_FD}" -ne 0 ]]; then
-    read -r -u "${TTY_FD}" -p "${prompt}" "${var}"
+    read -r -u "${TTY_FD}" -p "${prompt}" out
   else
-    read -r -p "${prompt}" "${var}"
+    read -r -p "${prompt}" out
   fi
 }
 
@@ -160,6 +168,9 @@ main() {
     run_manager "$@"
     exit 0
   fi
+
+  # Predeclare interactive vars to satisfy ShellCheck (and keep -u safe)
+  local choice="" domain="" email=""
 
   while true; do
     show_header
