@@ -30,20 +30,21 @@ fi
 read_i() {
   local prompt="$1"
   local var_name="$2"
+  local value=""
 
   # Validate var name to avoid unexpected behavior
   if [[ ! "${var_name}" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
     die "Internal error: invalid variable name '${var_name}'"
   fi
 
-  # Bash nameref: write into the caller-provided variable
-  local -n out="${var_name}"
-
   if [[ "${TTY_FD}" -ne 0 ]]; then
-    read -r -u "${TTY_FD}" -p "${prompt}" out
+    read -r -u "${TTY_FD}" -p "${prompt}" value
   else
-    read -r -p "${prompt}" out
+    read -r -p "${prompt}" value
   fi
+
+  # Assign to the requested variable name safely
+  printf -v "${var_name}" '%s' "${value}"
 }
 
 pause_msg() {
